@@ -45,7 +45,7 @@ DEFAULTS = {
     "tasks": None, "theme": "dark",
     "input_key": 0, "editing": None,
     "toast": None, "just_completed": [],
-    "confirm_delete": None,
+    "confirm_delete": None, "expanded_task": None,
 }
 for k, v in DEFAULTS.items():
     if k not in st.session_state:
@@ -206,11 +206,29 @@ html, body, [class*="css"] {{ font-family: 'Sora', sans-serif !important; }}
     border-radius:14px; padding:0.85rem 1.1rem; margin-bottom:0.15rem;
     transition:background .2s,border-color .2s,box-shadow .2s;
     backdrop-filter:blur(10px); animation:slideIn .22s ease;
+    cursor:pointer;
 }}
 .task-card:hover  {{ background:{T['card_hover']}; border-color:rgba(167,139,250,.28); }}
 .task-card.done   {{ background:{T['done_bg']};    border-color:{T['done_border']}; }}
 .task-card.anim   {{ animation:completePop .75s ease-out forwards; }}
 .task-card.editing {{ background:{T['edit_bg']}; border-color:{T['edit_border']}; box-shadow:0 0 22px rgba(124,58,237,.18); }}
+.task-card.expanded {{ border-color:rgba(167,139,250,.55); box-shadow:0 0 18px rgba(124,58,237,.15); border-bottom-left-radius:0; border-bottom-right-radius:0; }}
+
+/* Action drawer — slides in below the card when expanded */
+.action-drawer {{
+    background:{T['edit_bg']};
+    border:1px solid rgba(167,139,250,.35);
+    border-top:none;
+    border-bottom-left-radius:14px;
+    border-bottom-right-radius:14px;
+    padding:0.55rem 0.75rem 0.65rem;
+    margin-bottom:0.15rem;
+    animation:slideIn .18s ease;
+}}
+.tap-hint {{
+    font-size:0.62rem; color:{T['text_muted']}; text-align:right;
+    margin-top:0.28rem; padding-right:2px; font-style:italic;
+}}
 
 .task-top {{ display:flex; align-items:center; gap:0.65rem; flex-wrap:wrap; }}
 .task-num {{ font-family:'DM Mono',monospace; font-size:0.7rem; color:{T['text_muted']}; min-width:24px; }}
@@ -267,6 +285,23 @@ hr {{ border-color:{T['divider']} !important; margin:.9rem 0 !important; }}
 
 /* Alerts */
 .stSuccess>div, .stInfo>div, .stWarning>div {{ border-radius:12px !important; font-size:.87rem !important; }}
+
+/* Hide expand-toggle button text — card tap feel */
+button[kind="secondary"][data-testid^="baseButton"] {{  }}
+div[data-testid="stVerticalBlockBorderWrapper"] + div .stButton button {{  }}
+/* Make the expand toggle invisible — just the hit area */
+.stButton > button[title="Tap to expand actions"] {{
+    opacity:0 !important;
+    height:4px !important;
+    min-height:0 !important;
+    padding:0 !important;
+    margin-top:-6px !important;
+    margin-bottom:0 !important;
+    cursor:pointer !important;
+    border:none !important;
+    background:transparent !important;
+    box-shadow:none !important;
+}}
 
 /* ── Theme toggle pill ── */
 .theme-pill {{
@@ -397,14 +432,17 @@ def status_badge_html(done: bool) -> str:
             else '<span class="st-badge st-pending">● pending</span>')
 
 def render_task(i: int, task: dict, show_reorder: bool = True):
-    is_done    = task["completed"]
-    is_editing = st.session_state.editing == i
-    is_anim    = i in _anim_ids
+    is_done      = task["completed"]
+    is_editing   = st.session_state.editing == i
+    is_anim      = i in _anim_ids
+    is_expanded  = st.session_state.expanded_task == i
 
-    classes    = "task-card"
-    if is_done:    classes += " done"
-    if is_anim:    classes += " anim"
-    if is_editing: classes += " editing"
+    # ── Card HTML ──────────────────────────────────────────────────────────────
+    classes  = "task-card"
+    if is_done:     classes += " done"
+    if is_anim:     classes += " anim"
+    if is_editing:  classes += " editing"
+    if is_expanded and not is_editing: classes += " expanded"
 
     txt_cls = "task-txt done" if is_done else "task-txt"
 
@@ -417,11 +455,25 @@ def render_task(i: int, task: dict, show_reorder: bool = True):
         {status_badge_html(is_done)}
       </div>
       <div class="task-meta">📅 {task.get('created_at','—')}</div>
+      {"" if is_expanded or is_editing else '<div class="tap-hint">tap to manage →</div>'}
     </div>
     """, unsafe_allow_html=True)
 
+    # ── Tap toggle button (invisible, full-width, sits over card) ──────────────
+    if not is_editing:
+        if st.button(
+            "▾ hide" if is_expanded else "▸ manage",
+            key=f"expand_{i}",
+            use_container_width=True,
+            help="Tap to expand actions",
+        ):
+            st.session_state.expanded_task  = None if is_expanded else i
+            st.session_state.confirm_delete = None
+            st.rerun()
+
     # ── Edit form ──────────────────────────────────────────────────────────────
     if is_editing:
+        st.markdown('<div class="action-drawer">', unsafe_allow_html=True)
         st.markdown('<div class="sec-lbl">✏️ Editing task</div>', unsafe_allow_html=True)
         edit_txt = st.text_input(
             "Task description", value=task["task"],
@@ -440,41 +492,28 @@ def render_task(i: int, task: dict, show_reorder: bool = True):
                     st.session_state.tasks[i]["task"]     = stripped
                     st.session_state.tasks[i]["category"] = edit_cat
                     save_tasks(st.session_state.tasks)
-                    st.session_state.editing = None
-                    st.session_state.toast   = ("Task updated ✨", "success")
+                    st.session_state.editing      = None
+                    st.session_state.expanded_task = None
+                    st.session_state.toast         = ("Task updated ✨", "success")
                     st.rerun()
                 else:
                     st.warning("Task text can't be empty.")
         with s2:
             if st.button("✕ Cancel", key=f"cancel_{i}", use_container_width=True):
-                st.session_state.editing = None
+                st.session_state.editing       = None
+                st.session_state.expanded_task = None
                 st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── Action row ─────────────────────────────────────────────────────────────
-    else:
+    # ── Action drawer (tap-to-reveal) ──────────────────────────────────────────
+    elif is_expanded:
+        st.markdown('<div class="action-drawer">', unsafe_allow_html=True)
+
         n = len(tasks)
-        up_c, dn_c, edit_c, comp_c, del_c, _ = st.columns([0.4, 0.4, 1.0, 1.0, 0.55, 3.55])
-        with up_c:
-            if show_reorder and i > 0:
-                if st.button("↑", key=f"up_{i}", help="Move up"):
-                    st.session_state.tasks[i], st.session_state.tasks[i-1] = \
-                        st.session_state.tasks[i-1], st.session_state.tasks[i]
-                    save_tasks(st.session_state.tasks)
-                    st.rerun()
-        with dn_c:
-            if show_reorder and i < n - 1:
-                if st.button("↓", key=f"dn_{i}", help="Move down"):
-                    st.session_state.tasks[i], st.session_state.tasks[i+1] = \
-                        st.session_state.tasks[i+1], st.session_state.tasks[i]
-                    save_tasks(st.session_state.tasks)
-                    st.rerun()
-        with edit_c:
-            if st.button("✏️ Edit", key=f"edit_{i}", use_container_width=True):
-                st.session_state.editing        = i
-                st.session_state.confirm_delete = None
-                st.rerun()
-        with comp_c:
-            lbl  = "↩ Undo" if is_done else "✅ Done"
+        # Row 1: Done / Undo  +  Edit
+        r1c1, r1c2 = st.columns(2)
+        with r1c1:
+            lbl  = "↩ Undo"   if is_done else "✅ Done"
             kind = "secondary" if is_done else "primary"
             if st.button(lbl, key=f"comp_{i}", type=kind, use_container_width=True):
                 st.session_state.tasks[i]["completed"] = not is_done
@@ -484,34 +523,69 @@ def render_task(i: int, task: dict, show_reorder: bool = True):
                 else:
                     st.session_state.toast = ("Task moved back to pending.", "info")
                 save_tasks(st.session_state.tasks)
+                st.session_state.expanded_task = None
                 st.rerun()
-        with del_c:
-            if st.button("✕", key=f"del_{i}", help="Delete", use_container_width=True):
-                st.session_state.confirm_delete = i
-                st.session_state.editing        = None
+        with r1c2:
+            if st.button("✏️ Edit", key=f"edit_{i}", use_container_width=True):
+                st.session_state.editing       = i
+                st.session_state.expanded_task = i
+                st.session_state.confirm_delete = None
                 st.rerun()
 
-    # ── Confirm delete ─────────────────────────────────────────────────────────
-    if st.session_state.confirm_delete == i:
-        preview = task["task"][:48] + ("…" if len(task["task"]) > 48 else "")
-        st.markdown(f"""
-        <div class="confirm-box">
-          <div class="confirm-txt">⚠️ Delete "<strong>{preview}</strong>"? This cannot be undone.</div>
-        </div>
-        """, unsafe_allow_html=True)
-        c1, c2, _ = st.columns([1.2, 1, 4])
-        with c1:
-            if st.button("🗑️ Delete", key=f"yes_{i}", use_container_width=True):
-                removed = st.session_state.tasks.pop(i)
-                save_tasks(st.session_state.tasks)
-                st.session_state.confirm_delete = None
-                name = removed["task"][:30] + ("…" if len(removed["task"]) > 30 else "")
-                st.session_state.toast = (f'Deleted "{name}"', "info")
+        # Row 2: Up / Down / Delete  (only when reorder allowed)
+        if show_reorder:
+            r2c1, r2c2, r2c3 = st.columns(3)
+            with r2c1:
+                up_dis = (i == 0)
+                if st.button("↑ Up", key=f"up_{i}", use_container_width=True,
+                             disabled=up_dis):
+                    st.session_state.tasks[i], st.session_state.tasks[i-1] = \
+                        st.session_state.tasks[i-1], st.session_state.tasks[i]
+                    save_tasks(st.session_state.tasks)
+                    st.session_state.expanded_task = i - 1
+                    st.rerun()
+            with r2c2:
+                dn_dis = (i >= n - 1)
+                if st.button("↓ Down", key=f"dn_{i}", use_container_width=True,
+                             disabled=dn_dis):
+                    st.session_state.tasks[i], st.session_state.tasks[i+1] = \
+                        st.session_state.tasks[i+1], st.session_state.tasks[i]
+                    save_tasks(st.session_state.tasks)
+                    st.session_state.expanded_task = i + 1
+                    st.rerun()
+            with r2c3:
+                if st.button("🗑️ Delete", key=f"del_{i}", use_container_width=True):
+                    st.session_state.confirm_delete = i
+                    st.rerun()
+        else:
+            if st.button("🗑️ Delete", key=f"del_{i}", use_container_width=True):
+                st.session_state.confirm_delete = i
                 st.rerun()
-        with c2:
-            if st.button("Keep it", key=f"no_{i}", use_container_width=True):
-                st.session_state.confirm_delete = None
-                st.rerun()
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        # ── Confirm delete ─────────────────────────────────────────────────────
+        if st.session_state.confirm_delete == i:
+            preview = task["task"][:48] + ("…" if len(task["task"]) > 48 else "")
+            st.markdown(f"""
+            <div class="confirm-box">
+              <div class="confirm-txt">⚠️ Delete "<strong>{preview}</strong>"? This cannot be undone.</div>
+            </div>
+            """, unsafe_allow_html=True)
+            c1, c2, _ = st.columns([1.2, 1, 4])
+            with c1:
+                if st.button("🗑️ Yes, delete", key=f"yes_{i}", use_container_width=True):
+                    removed = st.session_state.tasks.pop(i)
+                    save_tasks(st.session_state.tasks)
+                    st.session_state.confirm_delete = None
+                    st.session_state.expanded_task  = None
+                    name = removed["task"][:30] + ("…" if len(removed["task"]) > 30 else "")
+                    st.session_state.toast = (f'Deleted "{name}"', "info")
+                    st.rerun()
+            with c2:
+                if st.button("Keep it", key=f"no_{i}", use_container_width=True):
+                    st.session_state.confirm_delete = None
+                    st.rerun()
 
     st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
 
@@ -687,6 +761,6 @@ with tab_stats:
 st.markdown("""
 <div class="footer">
   ✦ Designed &amp; built by <span>Mohammad Saad Raza</span><br>
-  &copy; 2026 All Rights Reserved
+  All Rights Reserved &copy; 2026
 </div>
 """, unsafe_allow_html=True)
